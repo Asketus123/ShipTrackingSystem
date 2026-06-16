@@ -55,4 +55,3 @@ simulation/controls.py - управляющие воздействия: импу
 visualization/animation.py - вся логика отрисовки и анимации.
 
 notebooks/experiments.ipynb - только для экспериментов, проверки гипотез, графиков и быстрых тестов.
-

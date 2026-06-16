@@ -1,159 +1,221 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from ship_model import ShipSnapshot, course_to_unit_vector
-
-
-def direction_vector(course_deg: float, length_nm: float) -> tuple[float, float]:
-    direction = course_to_unit_vector(course_deg)
-    return direction[0] * length_nm, direction[1] * length_nm
+from ship_model import EncounterSnapshot, ShipState, course_to_unit_vector
+from collision_metrics import line_intersection_by_courses
 
 
 def get_first_snapshot_by_phase(
-    snapshots: list[ShipSnapshot],
+    snapshots: list[EncounterSnapshot],
     phase_name: str
-) -> ShipSnapshot | None:
+) -> EncounterSnapshot | None:
     for snapshot in snapshots:
-        if snapshot.phase == phase_name:
+        if snapshot.own_phase == phase_name:
             return snapshot
+
     return None
 
 
-def plot_maneuver_with_return(
-    snapshots: list[ShipSnapshot],
-    initial_course_deg: float,
-    vector_length_nm: float,
+def plot_encounter_prediction(
+    snapshots: list[EncounterSnapshot],
+    own_initial_state: ShipState,
+    target_initial_state: ShipState,
+    safe_distance_nm: float,
     output_image_path: str | None = None
 ) -> None:
-    x = np.array([s.x_nm for s in snapshots])
-    y = np.array([s.y_nm for s in snapshots])
+    own_x = np.array([s.own_x_nm for s in snapshots])
+    own_y = np.array([s.own_y_nm for s in snapshots])
 
-    fig, ax = plt.subplots(figsize=(10, 10))
+    target_x = np.array([s.target_x_nm for s in snapshots])
+    target_y = np.array([s.target_y_nm for s in snapshots])
+
+    fig, ax = plt.subplots(figsize=(11, 11))
 
     start = snapshots[0]
     end = snapshots[-1]
+
+    maneuver_start = get_first_snapshot_by_phase(snapshots, "AVOIDING")
     return_start = get_first_snapshot_by_phase(snapshots, "RETURN_TO_TRACK")
     rejoin_point = get_first_snapshot_by_phase(snapshots, "ON_ORIGINAL_TRACK")
 
-    initial_direction = course_to_unit_vector(initial_course_deg)
+    min_distance_snapshot = min(snapshots, key=lambda s: s.distance_nm)
 
-    route_projection = (
-        (x - start.x_nm) * initial_direction[0]
-        + (y - start.y_nm) * initial_direction[1]
+    own_initial_direction = course_to_unit_vector(own_initial_state.course_deg)
+    target_initial_direction = course_to_unit_vector(target_initial_state.course_deg)
+
+    all_points_x = np.concatenate([own_x, target_x])
+    all_points_y = np.concatenate([own_y, target_y])
+
+    span = max(
+        all_points_x.max() - all_points_x.min(),
+        all_points_y.max() - all_points_y.min(),
+        1.0
     )
 
-    min_projection = min(route_projection.min(), 0.0) - 0.5
-    max_projection = max(route_projection.max(), 0.0) + 1.5
+    route_extension = span * 0.35 + 1.0
 
-    route_start = np.array([start.x_nm, start.y_nm]) + initial_direction * min_projection
-    route_end = np.array([start.x_nm, start.y_nm]) + initial_direction * max_projection
+    own_route_start = np.array([own_initial_state.x_nm, own_initial_state.y_nm]) - own_initial_direction * route_extension
+    own_route_end = np.array([own_initial_state.x_nm, own_initial_state.y_nm]) + own_initial_direction * (span + route_extension)
+
+    target_route_start = np.array([target_initial_state.x_nm, target_initial_state.y_nm]) - target_initial_direction * route_extension
+    target_route_end = np.array([target_initial_state.x_nm, target_initial_state.y_nm]) + target_initial_direction * (span + route_extension)
 
     ax.plot(
-        [route_start[0], route_end[0]],
-        [route_start[1], route_end[1]],
+        [own_route_start[0], own_route_end[0]],
+        [own_route_start[1], own_route_end[1]],
         linestyle="-",
-        linewidth=1.2,
-        label="Исходная линия пути"
+        linewidth=1.1,
+        label="Исходная линия пути собственного судна"
     )
 
-    phases = [snapshot.phase for snapshot in snapshots]
+
+    phases = [s.own_phase for s in snapshots]
 
     phase_styles = {
-        "MANEUVER": ("--", "Маневр уклонения"),
-        "RETURN_TO_TRACK": (":", "Возврат к исходной линии пути"),
-        "ON_ORIGINAL_TRACK": ("-.", "Движение после выхода на исходную линию")
+        "NORMAL": ("--", "Собственное судно до маневра"),
+        "AVOIDING": ("-", "Маневр уклонения собственного судна"),
+        "RETURN_TO_TRACK": (":", "Возврат на исходную линию пути"),
+        "ON_ORIGINAL_TRACK": ("--", "Движение после возврата"),
+        "NO_SAFE_MANEUVER": ("--", "Движение без найденного безопасного маневра")
     }
 
     for phase_name, style_data in phase_styles.items():
-        linestyle, label = style_data
         indices = [i for i, phase in enumerate(phases) if phase == phase_name]
 
         if not indices:
             continue
 
+        linestyle, label = style_data
+
         ax.plot(
-            x[indices],
-            y[indices],
+            own_x[indices],
+            own_y[indices],
             linestyle=linestyle,
             linewidth=2.4,
             label=label
         )
 
-    ax.scatter(
-        start.x_nm,
-        start.y_nm,
-        s=90,
-        marker="o",
-        label=(
-            f"Начало: X={start.x_nm:.3f} м.м., "
-            f"Y={start.y_nm:.3f} м.м."
-        )
+    ax.plot(
+        target_x,
+        target_y,
+        linestyle="-",
+        linewidth=2.0,
+        label="Траектория судна-цели"
     )
+
+    if maneuver_start is not None:
+        ax.scatter(
+            maneuver_start.own_x_nm,
+            maneuver_start.own_y_nm,
+            s=130,
+            marker="D",
+            label=f"Начало маневра: t={maneuver_start.time_sec:.0f} с"
+        )
 
     if return_start is not None:
         ax.scatter(
-            return_start.x_nm,
-            return_start.y_nm,
-            s=120,
-            marker="D",
-            label=(
-                f"Начало возврата: t={return_start.time_sec:.0f} с, "
-                f"X={return_start.x_nm:.3f}, Y={return_start.y_nm:.3f}"
-            )
+            return_start.own_x_nm,
+            return_start.own_y_nm,
+            s=130,
+            marker="P",
+            label=f"Начало возврата: t={return_start.time_sec:.0f} с"
         )
 
     if rejoin_point is not None:
         ax.scatter(
-            rejoin_point.x_nm,
-            rejoin_point.y_nm,
-            s=130,
+            rejoin_point.own_x_nm,
+            rejoin_point.own_y_nm,
+            s=140,
             marker="^",
-            label=(
-                f"Выход на линию пути: t={rejoin_point.time_sec:.0f} с, "
-                f"X={rejoin_point.x_nm:.3f}, Y={rejoin_point.y_nm:.3f}"
-            )
+            label=f"Выход на линию пути: t={rejoin_point.time_sec:.0f} с"
         )
+    ax.scatter(
+        start.own_x_nm,
+        start.own_y_nm,
+        s=230,
+        marker="o",
+        facecolors="none",
+        linewidths=2.2,
+        zorder=10,
+        label="Старт собственного судна"
+    )
 
     ax.scatter(
-        end.x_nm,
-        end.y_nm,
+        start.target_x_nm,
+        start.target_y_nm,
+        s=180,
+        marker="s",
+        facecolors="none",
+        linewidths=2.2,
+        zorder=10,
+        label="Старт судна-цели"
+    )
+    ax.scatter(
+        end.own_x_nm,
+        end.own_y_nm,
         s=170,
         marker="o",
         facecolors="none",
         linewidths=2,
-        label=(
-            f"Конец прогноза: t={end.time_sec:.0f} с, "
-            f"X={end.x_nm:.3f}, Y={end.y_nm:.3f}"
-        )
+        label="Конец прогноза собственного судна"
     )
 
-    for snapshot, label_prefix in [
-        (start, "Начальный вектор"),
-        (end, "Конечный вектор")
-    ]:
-        dx, dy = direction_vector(snapshot.course_deg, vector_length_nm)
+    ax.scatter(
+        end.target_x_nm,
+        end.target_y_nm,
+        s=170,
+        marker="s",
+        facecolors="none",
+        linewidths=2,
+        label="Конец прогноза судна-цели"
+    )
 
-        ax.quiver(
-            snapshot.x_nm,
-            snapshot.y_nm,
-            dx,
-            dy,
-            angles="xy",
-            scale_units="xy",
-            scale=1,
-            width=0.004,
-            label=(
-                f"{label_prefix}: курс={snapshot.course_deg:.1f}°, "
-                f"скорость={snapshot.speed_kn:.1f} уз."
-            )
+    ax.scatter(
+        min_distance_snapshot.own_x_nm,
+        min_distance_snapshot.own_y_nm,
+        s=110,
+        marker="x",
+        label=f"Минимальная дистанция: {min_distance_snapshot.distance_nm:.3f} м.м."
+    )
+
+    safe_circle = plt.Circle(
+        (min_distance_snapshot.target_x_nm, min_distance_snapshot.target_y_nm),
+        safe_distance_nm,
+        fill=False,
+        linestyle="--",
+        linewidth=1.4,
+        label="Зона безопасной дистанции у цели"
+    )
+
+    ax.add_patch(safe_circle)
+
+    intersection = line_intersection_by_courses(own_initial_state, target_initial_state)
+
+    if intersection is not None:
+        ax.scatter(
+            intersection[0],
+            intersection[1],
+            s=90,
+            marker="+",
+            label="Геометрическое пересечение исходных линий пути"
         )
 
-    all_x = np.concatenate([x, np.array([route_start[0], route_end[0]])])
-    all_y = np.concatenate([y, np.array([route_start[1], route_end[1]])])
+    all_x = np.concatenate([
+        own_x,
+        target_x,
+        np.array([own_route_start[0], own_route_end[0], target_route_start[0], target_route_end[0]])
+    ])
+
+    all_y = np.concatenate([
+        own_y,
+        target_y,
+        np.array([own_route_start[1], own_route_end[1], target_route_start[1], target_route_end[1]])
+    ])
 
     x_range = all_x.max() - all_x.min()
     y_range = all_y.max() - all_y.min()
-    margin = max(x_range, y_range, 0.5) * 0.15
+
+    margin = max(x_range, y_range, 0.5) * 0.12
 
     ax.set_xlim(all_x.min() - margin, all_x.max() + margin)
     ax.set_ylim(all_y.min() - margin, all_y.max() + margin)
@@ -163,9 +225,9 @@ def plot_maneuver_with_return(
 
     ax.set_xlabel("X, морские мили")
     ax.set_ylabel("Y, морские мили")
-    ax.set_title("Прогнозный маневр с возвратом на исходную линию пути")
+    ax.set_title("Автоматический запуск маневра при опасном сближении")
 
-    ax.legend(loc="best")
+    ax.legend(loc="best", fontsize=8)
     plt.tight_layout()
 
     if output_image_path is not None:
